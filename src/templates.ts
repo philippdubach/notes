@@ -60,9 +60,8 @@ export function renderNotePage(note: Note, previousId: string | null): string {
 
   const navLinks: string[] = [];
   if (previousId) {
-    navLinks.push(`<a href="/${previousId}">previous note</a> &gt;`);
+    navLinks.push(`<a href="/${previousId}">previous note</a>`);
   }
-  navLinks.push(`<a href="https://philippdubach.com/about">about</a>`);
 
   const content = `
     <div class="note-number">#${note.id}</div>
@@ -77,7 +76,6 @@ export function renderNotePage(note: Note, previousId: string | null): string {
 export function renderEmptyPage(): string {
   const content = `
     <p style="text-align: center; color: #666;">No notes yet.</p>
-    <p style="text-align: center; margin-top: 24px;"><a href="https://philippdubach.com/about">about</a></p>
   `;
   return htmlTemplate('Notes', content);
 }
