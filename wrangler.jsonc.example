@@ -1,0 +1,14 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "notes-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-01-01",
+	"compatibility_flags": ["global_fetch_strictly_public"],
+	"observability": { "enabled": true },
+	"kv_namespaces": [
+		{
+			"binding": "NOTES_KV",
+			"id": "YOUR_KV_NAMESPACE_ID"
+		}
+	]
+}
