@@ -1,0 +1,24 @@
+{
+	"name": "notes-worker",
+	"version": "0.0.0",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"test": "vitest",
+		"cf-typegen": "wrangler types"
+	},
+	"devDependencies": {
+		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"@types/sanitize-html": "^2.16.0",
+		"typescript": "^5.5.2",
+		"vitest": "~3.2.0",
+		"wrangler": "^4.59.2"
+	},
+	"dependencies": {
+		"marked": "^17.0.1",
+		"nanoid": "^5.1.6",
+		"sanitize-html": "^2.17.0"
+	}
+}
