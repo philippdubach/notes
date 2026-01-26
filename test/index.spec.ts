@@ -1,6 +1,7 @@
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import worker from '../src';
+import { saveNote, getNote, deleteNote, generateNoteId } from '../src/db';
 
 describe('Notes Worker Security Tests', () => {
 	describe('Public Routes', () => {
@@ -16,7 +17,10 @@ describe('Notes Worker Security Tests', () => {
 			// Verify security headers are present
 			expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
 			expect(response.headers.get('X-Frame-Options')).toBe('DENY');
-			expect(response.headers.get('Content-Security-Policy')).toContain("script-src 'none'");
+			// CSP allows inline scripts (for audio player) and analytics service (gc.zgo.at)
+			expect(response.headers.get('Content-Security-Policy')).toContain("script-src 'self' 'unsafe-inline' https://gc.zgo.at");
+			// HSTS header should be present
+			expect(response.headers.get('Strict-Transport-Security')).toContain('max-age=31536000');
 		});
 
 		it('GET /nonexistent returns 404 with security headers', async () => {
@@ -128,6 +132,140 @@ describe('Notes Worker Security Tests', () => {
 			expect(setCookie).toContain('Secure');
 			expect(setCookie).toContain('SameSite=Strict');
 			expect(setCookie).toContain('Path=/');
+		});
+	});
+
+	describe('Note CRUD Operations', () => {
+		it('can create and retrieve a note', async () => {
+			const id = await generateNoteId(env);
+			const note = await saveNote(env, id, 'Test Title', 'Test content in **markdown**');
+
+			expect(note.id).toBe(id);
+			expect(note.title).toBe('Test Title');
+			expect(note.content).toBe('Test content in **markdown**');
+			expect(note.htmlContent).toContain('<strong>markdown</strong>');
+
+			const retrieved = await getNote(env, id);
+			expect(retrieved).not.toBeNull();
+			expect(retrieved?.title).toBe('Test Title');
+
+			// Cleanup
+			await deleteNote(env, id);
+		});
+
+		it('can update an existing note', async () => {
+			const id = await generateNoteId(env);
+			await saveNote(env, id, 'Original Title', 'Original content');
+
+			const updated = await saveNote(env, id, 'Updated Title', 'Updated content');
+			expect(updated.title).toBe('Updated Title');
+			expect(updated.content).toBe('Updated content');
+
+			// Verify created timestamp is preserved
+			const retrieved = await getNote(env, id);
+			expect(retrieved?.title).toBe('Updated Title');
+
+			// Cleanup
+			await deleteNote(env, id);
+		});
+
+		it('can delete a note', async () => {
+			const id = await generateNoteId(env);
+			await saveNote(env, id, 'To Delete', 'Content');
+
+			const deleted = await deleteNote(env, id);
+			expect(deleted).toBe(true);
+
+			const retrieved = await getNote(env, id);
+			expect(retrieved).toBeNull();
+		});
+
+		it('returns false when deleting non-existent note', async () => {
+			const deleted = await deleteNote(env, 'nonexistent-id-12345');
+			expect(deleted).toBe(false);
+		});
+	});
+
+	describe('XSS Sanitization', () => {
+		it('strips script tags from markdown content', async () => {
+			const id = await generateNoteId(env);
+			const maliciousContent = 'Hello <script>alert("XSS")</script> world';
+			const note = await saveNote(env, id, 'Test', maliciousContent);
+
+			expect(note.htmlContent).not.toContain('<script>');
+			expect(note.htmlContent).not.toContain('alert(');
+			expect(note.htmlContent).toContain('Hello');
+			expect(note.htmlContent).toContain('world');
+
+			await deleteNote(env, id);
+		});
+
+		it('strips onclick handlers from markdown content', async () => {
+			const id = await generateNoteId(env);
+			const maliciousContent = 'Click <a href="#" onclick="alert(1)">here</a>';
+			const note = await saveNote(env, id, 'Test', maliciousContent);
+
+			expect(note.htmlContent).not.toContain('onclick');
+			expect(note.htmlContent).toContain('href');
+
+			await deleteNote(env, id);
+		});
+
+		it('strips javascript: URLs from links', async () => {
+			const id = await generateNoteId(env);
+			const maliciousContent = 'Click [here](javascript:alert(1))';
+			const note = await saveNote(env, id, 'Test', maliciousContent);
+
+			expect(note.htmlContent).not.toContain('javascript:');
+
+			await deleteNote(env, id);
+		});
+
+		it('allows safe markdown features', async () => {
+			const id = await generateNoteId(env);
+			const safeContent = `
+# Heading
+
+This is **bold** and *italic* text.
+
+- List item 1
+- List item 2
+
+[Safe link](https://example.com)
+
+\`inline code\`
+
+\`\`\`
+code block
+\`\`\`
+`;
+			const note = await saveNote(env, id, 'Test', safeContent);
+
+			expect(note.htmlContent).toContain('<h1>');
+			expect(note.htmlContent).toContain('<strong>bold</strong>');
+			expect(note.htmlContent).toContain('<em>italic</em>');
+			expect(note.htmlContent).toContain('<li>');
+			expect(note.htmlContent).toContain('href="https://example.com"');
+			expect(note.htmlContent).toContain('<code>');
+
+			await deleteNote(env, id);
+		});
+
+		it('escapes HTML entities in title display', async () => {
+			const id = await generateNoteId(env);
+			const note = await saveNote(env, id, '<script>alert("XSS")</script>', 'Content');
+
+			// Request the note page
+			const request = new Request<unknown, IncomingRequestCfProperties>(`http://example.com/${id}`);
+			const ctx = createExecutionContext();
+			const response = await worker.fetch(request, env, ctx);
+			await waitOnExecutionContext(ctx);
+
+			const html = await response.text();
+			expect(html).not.toContain('<script>alert("XSS")</script>');
+			expect(html).toContain('&lt;script&gt;');
+
+			await deleteNote(env, id);
 		});
 	});
 });

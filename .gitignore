@@ -22,3 +22,7 @@ wrangler.jsonc
 
 # Test coverage
 coverage/
+CLAUDE.md
+
+# Temporary files
+tmp/

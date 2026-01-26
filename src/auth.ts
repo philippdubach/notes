@@ -6,17 +6,38 @@ const SESSION_TTL = 60 * 60 * 24; // 24 hours
 /**
  * Security headers to be added to all responses.
  * These mitigate various attack vectors:
+ * - HSTS: Forces HTTPS connections (prevents downgrade attacks)
  * - CSP: Prevents inline script execution (XSS mitigation)
  * - X-Content-Type-Options: Prevents MIME sniffing
  * - X-Frame-Options: Prevents clickjacking
  * - Referrer-Policy: Controls information leakage
  */
 export const SECURITY_HEADERS: Record<string, string> = {
-  'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; script-src 'none'",
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
+  'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; script-src 'self' 'unsafe-inline' https://gc.zgo.at; connect-src 'self' https://stats.philippdubach.com; media-src 'self' https://static.philippdubach.com",
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+};
+
+/**
+ * Rate limiting configuration for login attempts.
+ * Uses KV with TTL for simple distributed rate limiting.
+ */
+export const RATE_LIMIT_CONFIG = {
+  LOGIN_WINDOW_SECONDS: 300, // 5 minute window
+  LOGIN_MAX_ATTEMPTS: 5,      // Max 5 attempts per window
+  LOGIN_KEY_PREFIX: 'ratelimit:login:',
+};
+
+/**
+ * Input validation limits to prevent resource exhaustion.
+ */
+export const INPUT_LIMITS = {
+  MAX_TITLE_LENGTH: 500,
+  MAX_CONTENT_LENGTH: 100000, // 100KB
+  MAX_PASSWORD_LENGTH: 1000,
 };
 
 /**
@@ -95,4 +116,78 @@ export async function requireAuth(request: Request, env: Env): Promise<Response 
     });
   }
   return null; // Authenticated
+}
+
+/**
+ * Get client IP for rate limiting (handles CF-Connecting-IP header).
+ * Falls back to a default key if no IP is available.
+ */
+export function getClientIp(request: Request): string {
+  return request.headers.get('CF-Connecting-IP') ||
+         request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+         'unknown';
+}
+
+/**
+ * Check if a login attempt should be rate limited.
+ * Returns the number of remaining attempts, or 0 if blocked.
+ */
+export async function checkLoginRateLimit(
+  env: Env,
+  clientIp: string
+): Promise<{ allowed: boolean; remaining: number; resetIn: number }> {
+  const key = `${RATE_LIMIT_CONFIG.LOGIN_KEY_PREFIX}${clientIp}`;
+  const record = await env.NOTES_KV.get(key, { type: 'json' }) as { count: number; firstAttempt: number } | null;
+  
+  const now = Date.now();
+  const windowMs = RATE_LIMIT_CONFIG.LOGIN_WINDOW_SECONDS * 1000;
+  
+  if (!record) {
+    return { allowed: true, remaining: RATE_LIMIT_CONFIG.LOGIN_MAX_ATTEMPTS - 1, resetIn: windowMs };
+  }
+  
+  // Check if window has expired
+  if (now - record.firstAttempt > windowMs) {
+    return { allowed: true, remaining: RATE_LIMIT_CONFIG.LOGIN_MAX_ATTEMPTS - 1, resetIn: windowMs };
+  }
+  
+  const remaining = RATE_LIMIT_CONFIG.LOGIN_MAX_ATTEMPTS - record.count;
+  const resetIn = windowMs - (now - record.firstAttempt);
+  
+  return {
+    allowed: remaining > 0,
+    remaining: Math.max(0, remaining - 1),
+    resetIn,
+  };
+}
+
+/**
+ * Record a login attempt for rate limiting.
+ */
+export async function recordLoginAttempt(env: Env, clientIp: string): Promise<void> {
+  const key = `${RATE_LIMIT_CONFIG.LOGIN_KEY_PREFIX}${clientIp}`;
+  const record = await env.NOTES_KV.get(key, { type: 'json' }) as { count: number; firstAttempt: number } | null;
+  
+  const now = Date.now();
+  const windowMs = RATE_LIMIT_CONFIG.LOGIN_WINDOW_SECONDS * 1000;
+  
+  if (!record || now - record.firstAttempt > windowMs) {
+    // Start new window
+    await env.NOTES_KV.put(key, JSON.stringify({ count: 1, firstAttempt: now }), {
+      expirationTtl: RATE_LIMIT_CONFIG.LOGIN_WINDOW_SECONDS,
+    });
+  } else {
+    // Increment existing window
+    await env.NOTES_KV.put(key, JSON.stringify({ count: record.count + 1, firstAttempt: record.firstAttempt }), {
+      expirationTtl: Math.ceil((windowMs - (now - record.firstAttempt)) / 1000),
+    });
+  }
+}
+
+/**
+ * Clear rate limit after successful login.
+ */
+export async function clearLoginRateLimit(env: Env, clientIp: string): Promise<void> {
+  const key = `${RATE_LIMIT_CONFIG.LOGIN_KEY_PREFIX}${clientIp}`;
+  await env.NOTES_KV.delete(key);
 }
